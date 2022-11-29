@@ -1,3 +1,4 @@
+import imghdr
 import os
 import torch
 from torch.utils.data import Dataset
@@ -7,7 +8,7 @@ from torchvision.transforms import transforms
 import pickle
 from scipy import ndimage
 
-
+#相当于给文件指针，pickle.load(f)指的是将f二进制文件对象转成python对象？？？？
 def pkload(fname):
     with open(fname, 'rb') as f:
         return pickle.load(f)
@@ -29,7 +30,7 @@ class Random_Flip(object):
         image = sample['image']
         label = sample['label']
         if random.random() < 0.5:
-            image = np.flip(image, 0)
+            image =     (image, 0)
             label = np.flip(label, 0)
         if random.random() < 0.5:
             image = np.flip(image, 1)
@@ -49,7 +50,7 @@ class Random_Crop(object):
         W = random.randint(0, 240 - 128)
         D = random.randint(0, 160 - 128)
 
-        image = image[H: H + 128, W: W + 128, D: D + 128, ...]
+        image = image[H: H + 128, W: W + 128, D: D + 128, ...]#为啥是128呢，这样数据被裁剪完剩多少了呢?起码还是连续的
         label = label[..., H: H + 128, W: W + 128, D: D + 128]
 
         return {'image': image, 'label': label}
@@ -85,10 +86,11 @@ class Pad(object):
         image = sample['image']
         label = sample['label']
 
-        image = np.pad(image, ((0, 0), (0, 0), (0, 5), (0, 0)), mode='constant')
-        label = np.pad(label, ((0, 0), (0, 0), (0, 5)), mode='constant')
+        image = np.pad(image, ((0, 0), (0, 0), (0, 62), (0, 0)), mode='constant')
+        label = np.pad(label, ((0, 0), (0, 0), (0, 62)), mode='constant')
         return {'image': image, 'label': label}
     #(240,240,155)>(240,240,160)
+    #(512,512,98)
 
 
 class ToTensor(object):
@@ -110,9 +112,10 @@ def transform(sample):
         Pad(),
         # Random_rotate(),  # time-consuming
         Random_Crop(),
-        Random_Flip(),
-        Random_intencity_shift(),
+        # Random_Flip(),
+        # Random_intencity_shift(),
         ToTensor()
+
     ])
 
     return trans(sample)
@@ -129,27 +132,21 @@ def transform_valid(sample):
 
 
 class BraTS(Dataset):
-    def __init__(self, list_file, root='', mode='train'):
+    def __init__(self, root='/data/ljf', mode='train'):
         self.lines = []
-        paths, names = [], []
-        with open(list_file) as f:
-            for line in f:
-                line = line.strip()
-                name = line.split('/')[-1]
-                names.append(name)
-                path = os.path.join(root, line, name + '_')
-                paths.append(path)
-                self.lines.append(line)
+        paths = [], 
+        data_files = os.listdir(root)
+        paths = [os.path.join(root, data_file) for data_file in data_files]
         self.mode = mode
-        self.names = names
         self.paths = paths
 
     def __getitem__(self, item):
         path = self.paths[item]
         if self.mode == 'train':
-            image, label = pkload(path + 'data_f32b0.pkl')
+            image, label = pkload(os.path.join(path, 'data_f32b0.pkl'))
+
             sample = {'image': image, 'label': label}
-            sample = transform(sample)
+            sample = transform(sample)#这这里对数据进行改变
             return sample['image'], sample['label']
         elif self.mode == 'valid':
             image, label = pkload(path + 'data_f32b0.pkl')
@@ -164,7 +161,7 @@ class BraTS(Dataset):
             return image
 
     def __len__(self):
-        return len(self.names)
+        return len(self.paths)
 
     def collate(self, batch):
         return [torch.cat(v) for v in zip(*batch)]

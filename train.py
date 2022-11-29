@@ -1,6 +1,7 @@
 # python3 -m torch.distributed.launch --nproc_per_node=4 --master_port 20003 train_spup3.py
 
 import argparse
+import imghdr
 import os
 import random
 import logging
@@ -39,9 +40,9 @@ parser.add_argument('--description',
                     type=str)
 
 # DataSet Information
-parser.add_argument('--root', default='path to training set', type=str)
+parser.add_argument('--root', default='/data/ljf', type=str)
 
-parser.add_argument('--train_dir', default='Train', type=str)
+parser.add_argument('--train_dir', default='train', type=str)
 
 parser.add_argument('--valid_dir', default='Valid', type=str)
 
@@ -86,11 +87,11 @@ parser.add_argument('--seed', default=1000, type=int)
 
 parser.add_argument('--no_cuda', default=False, type=bool)
 
-parser.add_argument('--gpu', default='0,1,2,3', type=str)
+parser.add_argument('--gpu', default='cuda:3', type=str)
 
 parser.add_argument('--num_workers', default=8, type=int)
 
-parser.add_argument('--batch_size', default=8, type=int)
+parser.add_argument('--batch_size', default=1, type=int)
 
 parser.add_argument('--start_epoch', default=0, type=int)
 
@@ -118,18 +119,17 @@ def main_worker():
         logging.info('----------------------------------------This is a halving line----------------------------------')
         logging.info('{}'.format(args.description))
 
-    torch.manual_seed(args.seed)
-    torch.cuda.manual_seed(args.seed)
-    random.seed(args.seed)
+    torch.manual_seed(args.seed)#为cpu设置随机数种子，复现，每次运行结果一样
+    torch.cuda.manual_seed(args.seed)#为GPU
+    random.seed(args.seed)#为random模块
     np.random.seed(args.seed)
-    torch.distributed.init_process_group('nccl')
-    torch.cuda.set_device(args.local_rank)
-
+    torch.cuda.set_device(args.gpu)
+    
     _, model = TransBTS(dataset='brats', _conv_repr=True, _pe_type="learned")
 
-    model.cuda(args.local_rank)
-    model = nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank], output_device=args.local_rank,
-                                                find_unused_parameters=True)
+    model.cuda(args.gpu)
+    # model = nn.parallel.DistributedDataParallel(model, device_ids=[args.local_rank], output_device=args.local_rank,
+    #                                             find_unused_parameters=True)
     model.train()
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, amsgrad=args.amsgrad)
@@ -157,17 +157,16 @@ def main_worker():
     else:
         logging.info('re-training!!!')
 
-    train_list = os.path.join(args.root, args.train_dir, args.train_file)
+    
     train_root = os.path.join(args.root, args.train_dir)
 
-    train_set = BraTS(train_list, train_root, args.mode)
-    train_sampler = torch.utils.data.distributed.DistributedSampler(train_set)
+    train_set = BraTS(train_root, args.mode)
     logging.info('Samples for train = {}'.format(len(train_set)))
 
 
-    num_gpu = (len(args.gpu)+1) // 2
+    num_gpu = 1
 
-    train_loader = DataLoader(dataset=train_set, sampler=train_sampler, batch_size=args.batch_size // num_gpu,
+    train_loader = DataLoader(dataset=train_set, batch_size=args.batch_size // num_gpu,
                               drop_last=True, num_workers=args.num_workers, pin_memory=True)
 
     start_time = time.time()
@@ -175,8 +174,8 @@ def main_worker():
     torch.set_grad_enabled(True)
 
     for epoch in range(args.start_epoch, args.end_epoch):
-        train_sampler.set_epoch(epoch)  # shuffle
-        setproctitle.setproctitle('{}: {}/{}'.format(args.user, epoch+1, args.end_epoch))
+        # train_sampler.set_epoch(epoch)  # shuffle
+        # setproctitle.setproctitle('{}: {}/{}'.format(args.user, epoch+1, args.end_epoch))
         start_epoch = time.time()
 
         for i, data in enumerate(train_loader):
@@ -184,21 +183,19 @@ def main_worker():
             adjust_learning_rate(optimizer, epoch, args.end_epoch, args.lr)
 
             x, target = data
-            x = x.cuda(args.local_rank, non_blocking=True)
-            target = target.cuda(args.local_rank, non_blocking=True)
-
-
-            output = model(x)
+            x = x.cuda(args.gpu, non_blocking=True)
+            target = target.cuda(args.gpu, non_blocking=True)
+            output = model(x)#这有问题
 
             loss, loss1, loss2, loss3 = criterion(output, target)
-            reduce_loss = all_reduce_tensor(loss, world_size=num_gpu).data.cpu().numpy()
-            reduce_loss1 = all_reduce_tensor(loss1, world_size=num_gpu).data.cpu().numpy()
-            reduce_loss2 = all_reduce_tensor(loss2, world_size=num_gpu).data.cpu().numpy()
-            reduce_loss3 = all_reduce_tensor(loss3, world_size=num_gpu).data.cpu().numpy()
+            # reduce_loss = all_reduce_tensor(loss, world_size=num_gpu).data.cpu().numpy()
+            # reduce_loss1 = all_reduce_tensor(loss1, world_size=num_gpu).data.cpu().numpy()
+            # reduce_loss2 = all_reduce_tensor(loss2, world_size=num_gpu).data.cpu().numpy()
+            # reduce_loss3 = all_reduce_tensor(loss3, world_size=num_gpu).data.cpu().numpy()
 
             if args.local_rank == 0:
                 logging.info('Epoch: {}_Iter:{}  loss: {:.5f} || 1:{:.4f} | 2:{:.4f} | 3:{:.4f} ||'
-                             .format(epoch, i, reduce_loss, reduce_loss1, reduce_loss2, reduce_loss3))
+                             .format(epoch, i, loss, loss1, loss2, loss3))
 
             optimizer.zero_grad()
             loss.backward()
@@ -219,10 +216,10 @@ def main_worker():
                     file_name)
 
             writer.add_scalar('lr:', optimizer.param_groups[0]['lr'], epoch)
-            writer.add_scalar('loss:', reduce_loss, epoch)
-            writer.add_scalar('loss1:', reduce_loss1, epoch)
-            writer.add_scalar('loss2:', reduce_loss2, epoch)
-            writer.add_scalar('loss3:', reduce_loss3, epoch)
+            # writer.add_scalar('loss:', reduce_loss, epoch)
+            # writer.add_scalar('loss1:', reduce_loss1, epoch)
+            # writer.add_scalar('loss2:', reduce_loss2, epoch)
+            # writer.add_scalar('loss3:', reduce_loss3, epoch)
 
         if args.local_rank == 0:
             epoch_time_minute = (end_epoch-start_epoch)/60
@@ -276,7 +273,7 @@ def log_args(log_file):
 
 
 if __name__ == '__main__':
-    os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
+    # os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
     assert torch.cuda.is_available(), "Currently, we only support CUDA version"
     torch.backends.cudnn.enabled = True
     torch.backends.cudnn.benchmark = True
